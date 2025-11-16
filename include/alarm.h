@@ -6,7 +6,7 @@
 namespace opendial::alarm {
 
 struct Alarm {
-    std::string uuid;
+    const std::string uuid;
     std::chrono::system_clock::time_point time;
     std::string label;
     bool enabled{true};
