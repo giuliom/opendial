@@ -65,10 +65,13 @@ set(ASIO_DEFS
 )
 
 
-# ------ Argvnaut Library ------
+# ------ OpenDial Library ------
 file(GLOB LIBRARY_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 add_library(${LIBRARY_NAME} ${LIBRARY_SOURCES})
 target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(${LIBRARY_NAME} PUBLIC asio)
+target_compile_definitions(${LIBRARY_NAME} PUBLIC ${ASIO_DEFS})
+link_platform_libs(${LIBRARY_NAME})
 
 # ------ Test Target ------
 file (GLOB TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test/*.cpp")
