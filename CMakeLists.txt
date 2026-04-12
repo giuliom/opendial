@@ -45,7 +45,8 @@ target_compile_definitions(asio INTERFACE ${ASIO_DEFS})
 # Ensure pthread is used on Unix-like systems
 if(UNIX AND NOT APPLE)
   set(THREADS_PREFER_PTHREAD_FLAG ON)
-elseif(APPLE)
+endif()
+if(NOT WIN32)
   find_package(Threads REQUIRED)
 endif()
 
