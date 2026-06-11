@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <string>
 
 namespace opendial::sync {
@@ -173,10 +174,14 @@ void SyncServer::handleMessage(std::shared_ptr<SyncSession> session,
         // payload = "uuid\x1Fversion"
         auto sep = msg.payload.find(kFieldSep);
         if (sep != std::string::npos) {
-            std::string uuid = msg.payload.substr(0, sep);
-            std::uint64_t ver = std::stoull(msg.payload.substr(sep + 1));
-            manager_.mergeDelete(uuid, ver);
-            broadcast(msg, session);
+            try {
+                std::string uuid = msg.payload.substr(0, sep);
+                std::uint64_t ver = std::stoull(msg.payload.substr(sep + 1));
+                manager_.mergeDelete(uuid, ver);
+                broadcast(msg, session);
+            } catch (const std::exception&) {
+                // Ignore malformed delete payloads from the wire.
+            }
         }
         break;
     }
@@ -334,9 +339,13 @@ void SyncClient::handleMessage(const SyncMessage& msg) {
     case MessageType::AlarmDelete: {
         auto sep = msg.payload.find(kFieldSep);
         if (sep != std::string::npos) {
-            std::string uuid = msg.payload.substr(0, sep);
-            std::uint64_t ver = std::stoull(msg.payload.substr(sep + 1));
-            manager_.mergeDelete(uuid, ver);
+            try {
+                std::string uuid = msg.payload.substr(0, sep);
+                std::uint64_t ver = std::stoull(msg.payload.substr(sep + 1));
+                manager_.mergeDelete(uuid, ver);
+            } catch (const std::exception&) {
+                // Ignore malformed delete payloads from the wire.
+            }
         }
         break;
     }

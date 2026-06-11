@@ -8,8 +8,8 @@
 namespace opendial::utils {
 
 inline std::string generateuuid() {
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    // Seed once per thread instead of reconstructing the engine on every call.
+    static thread_local std::mt19937 gen{std::random_device{}()};
     std::uniform_int_distribution<> dis(0, 15);
     std::uniform_int_distribution<> dis2(8, 11);
 

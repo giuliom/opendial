@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <exception>
 #include <sstream>
 #include <string>
 
@@ -68,17 +69,24 @@ std::optional<Alarm> Alarm::deserialize(std::string_view data) {
     }
     if (fields.size() != 8) return std::nullopt;
 
-    Alarm a;
-    a.uuid            = std::string(fields[0]);
-    a.time            = timeFromString(fields[1]);
-    a.label           = std::string(fields[2]);
-    a.enabled         = (fields[3] == "1");
-    a.version         = std::stoull(std::string(fields[4]));
-    a.device_id       = std::string(fields[5]);
-    a.recurrence_days = static_cast<std::uint8_t>(
-                            std::stoul(std::string(fields[6])));
-    a.last_modified   = timeFromString(fields[7]);
-    return a;
+    // Numeric fields come from an untrusted wire format; std::sto* throws on
+    // malformed input, so guard against it and reject the record instead of
+    // letting the exception propagate into the async network handlers.
+    try {
+        Alarm a;
+        a.uuid            = std::string(fields[0]);
+        a.time            = timeFromString(fields[1]);
+        a.label           = std::string(fields[2]);
+        a.enabled         = (fields[3] == "1");
+        a.version         = std::stoull(std::string(fields[4]));
+        a.device_id       = std::string(fields[5]);
+        a.recurrence_days = static_cast<std::uint8_t>(
+                                std::stoul(std::string(fields[6])));
+        a.last_modified   = timeFromString(fields[7]);
+        return a;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 // ── AlarmManager ─────────────────────────────────────────────────────────

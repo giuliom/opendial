@@ -11,6 +11,9 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Export compile_commands.json for IDE/IntelliSense integration
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Avoid warnings by using new policy
 cmake_policy(SET CMP0135 NEW)
 
