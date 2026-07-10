@@ -41,20 +41,20 @@ static bool hasValidWireFields(const Alarm& alarm) {
 }
 
 static std::string timeToString(std::chrono::system_clock::time_point tp) {
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                   tp.time_since_epoch())
                   .count();
-    return std::to_string(us);
+    return std::to_string(ns);
 }
 
 static std::chrono::system_clock::time_point timeFromString(std::string_view sv) {
-    std::int64_t us = 0;
-    if (!parseInteger(sv, us)) {
+    std::int64_t ns = 0;
+    if (!parseInteger(sv, ns)) {
         throw std::invalid_argument("invalid alarm timestamp");
     }
     return std::chrono::system_clock::time_point{
         std::chrono::duration_cast<std::chrono::system_clock::duration>(
-            std::chrono::microseconds{us})};
+            std::chrono::nanoseconds{ns})};
 }
 
 // ── Alarm ────────────────────────────────────────────────────────────────

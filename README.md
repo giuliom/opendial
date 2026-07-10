@@ -1,7 +1,7 @@
 # opendial
 An open source, cross-platform C++ alarm synchronization library.
 
-[![Tests](https://github.com/giuliom/opendial/actions/workflows/cmake-multi-platform.yml/badge.svg)](https://github.com/giuliom/opendial/actions/workflows/cmake-multi-platform.yml)
+[![Tests](https://github.com/giuliom/opendial/actions/workflows/tests.yml/badge.svg)](https://github.com/giuliom/opendial/actions/workflows/tests.yml)
 
 OpenDial provides a thread-safe alarm store and a small TCP synchronization
 layer for sharing alarms between devices. It is implemented in C++23, uses
