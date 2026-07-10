@@ -61,6 +61,38 @@ TEST_F(AlarmTest, DeserializeInvalidData) {
     EXPECT_FALSE(Alarm::deserialize("too|few|fields").has_value());
 }
 
+TEST_F(AlarmTest, DeserializeRejectsMalformedValues) {
+    const auto makeWire = [](std::string enabled, std::string version,
+                             std::string recurrence) {
+        std::string wire = "id";
+        wire += '\x1F';
+        wire += "0";
+        wire += '\x1F';
+        wire += "label";
+        wire += '\x1F';
+        wire += enabled;
+        wire += '\x1F';
+        wire += version;
+        wire += '\x1F';
+        wire += "device";
+        wire += '\x1F';
+        wire += recurrence;
+        wire += '\x1F';
+        wire += "0";
+        return wire;
+    };
+
+    EXPECT_FALSE(Alarm::deserialize(makeWire("yes", "1", "0")));
+    EXPECT_FALSE(Alarm::deserialize(makeWire("1", "1tail", "0")));
+    EXPECT_FALSE(Alarm::deserialize(makeWire("1", "1", "128")));
+}
+
+TEST_F(AlarmTest, SerializeRejectsReservedSeparators) {
+    Alarm alarm;
+    alarm.label = "bad\x1Fvalue";
+    EXPECT_THROW(alarm.serialize(), std::invalid_argument);
+}
+
 // ── AlarmManager tests ───────────────────────────────────────────────────
 
 class AlarmManagerTest : public ::testing::Test {
@@ -106,6 +138,34 @@ TEST_F(AlarmManagerTest, UpdateNonexistent) {
     EXPECT_FALSE(manager.updateAlarm("no-such-id", [](Alarm&) {}));
 }
 
+TEST_F(AlarmManagerTest, UpdatePreservesIdentity) {
+    const auto id = manager.addAlarm(
+        Alarm(std::chrono::system_clock::now() + 1h, "Test", "x"));
+
+    ASSERT_TRUE(manager.updateAlarm(id, [](Alarm& alarm) {
+        alarm.uuid = "a-different-identity";
+    }));
+    ASSERT_TRUE(manager.getAlarm(id).has_value());
+    EXPECT_EQ(manager.getAlarm(id)->uuid, id);
+    EXPECT_FALSE(manager.getAlarm("a-different-identity").has_value());
+}
+
+TEST_F(AlarmManagerTest, AddRegeneratesDuplicateIdentity) {
+    Alarm first(std::chrono::system_clock::now() + 1h, "First", "x");
+    Alarm second = first;
+    const auto first_id = manager.addAlarm(std::move(first));
+    const auto second_id = manager.addAlarm(std::move(second));
+
+    EXPECT_NE(first_id, second_id);
+    EXPECT_EQ(manager.getAllAlarms().size(), 2u);
+}
+
+TEST_F(AlarmManagerTest, AddRejectsReservedFields) {
+    Alarm invalid(std::chrono::system_clock::now() + 1h, "bad\x1Flabel", "x");
+    EXPECT_THROW(manager.addAlarm(std::move(invalid)), std::invalid_argument);
+    EXPECT_TRUE(manager.getAllAlarms().empty());
+}
+
 TEST_F(AlarmManagerTest, RemoveAlarm) {
     std::string id =
         manager.addAlarm(Alarm(std::chrono::system_clock::now() + 1h, "X", "x"));
@@ -124,6 +184,20 @@ public:
     void onAlarmRemoved(const std::string&) override { ++removed; }
 };
 
+class QueryingObserver : public AlarmObserver {
+public:
+    explicit QueryingObserver(AlarmManager& manager) : manager_(manager) {}
+
+    void onAlarmAdded(const Alarm& alarm) override {
+        observed_alarm = manager_.getAlarm(alarm.uuid);
+    }
+
+    std::optional<Alarm> observed_alarm;
+
+private:
+    AlarmManager& manager_;
+};
+
 TEST_F(AlarmManagerTest, ObserverNotifications) {
     auto obs = std::make_shared<TestObserver>();
     manager.addObserver(obs);
@@ -137,6 +211,17 @@ TEST_F(AlarmManagerTest, ObserverNotifications) {
 
     manager.removeAlarm(id);
     EXPECT_EQ(obs->removed, 1);
+}
+
+TEST_F(AlarmManagerTest, ObserverCanQueryManager) {
+    auto observer = std::make_shared<QueryingObserver>(manager);
+    manager.addObserver(observer);
+
+    std::string id = manager.addAlarm(
+        Alarm(std::chrono::system_clock::now() + 1h, "Z", "x"));
+
+    ASSERT_TRUE(observer->observed_alarm.has_value());
+    EXPECT_EQ(observer->observed_alarm->uuid, id);
 }
 
 // ── Merge / sync conflict tests ──────────────────────────────────────────
@@ -242,6 +327,18 @@ TEST(SyncMessageTest, EmptyPayload) {
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded->type, MessageType::FullSyncRequest);
     EXPECT_TRUE(decoded->payload.empty());
+}
+
+TEST(SyncMessageTest, RejectsUnknownTypesAndInvalidPayloads) {
+    const char unknown_type[] = {static_cast<char>(99)};
+    EXPECT_FALSE(SyncMessage::decode(unknown_type, sizeof(unknown_type)));
+
+    const char request_with_payload[] = {
+        static_cast<char>(MessageType::FullSyncRequest), 'x'};
+    EXPECT_FALSE(SyncMessage::decode(request_with_payload,
+                                     sizeof(request_with_payload)));
+    EXPECT_THROW((SyncMessage{MessageType::Ack, "x"}).encode(),
+                 std::invalid_argument);
 }
 
 // ── Client-Server integration test ───────────────────────────────────────

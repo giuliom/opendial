@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.23)
 project(OpenDialProject LANGUAGES CXX)
 
+include(CTest)
+
 set(LIBRARY_NAME OpenDialLib)
 set(TEST_NAME OpenDialTest)
 

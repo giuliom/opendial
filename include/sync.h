@@ -4,7 +4,9 @@
 
 #include <asio.hpp>
 #include <atomic>
+#include <array>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -63,12 +65,18 @@ public:
 private:
     void readHeader();
     void readBody(std::uint32_t length);
+    void enqueueWrite(std::shared_ptr<std::vector<char>> buffer);
+    void writeNext();
+    void disconnect();
 
     asio::ip::tcp::socket socket_;
     MessageHandler on_message_;
     DisconnectHandler on_disconnect_;
     std::array<char, 4> header_buf_{};
     std::vector<char> body_buf_;
+    std::deque<std::shared_ptr<std::vector<char>>> write_queue_;
+    bool write_in_progress_{false};
+    bool disconnected_{false};
 };
 
 // ── Sync server ──────────────────────────────────────────────────────────
@@ -131,6 +139,8 @@ private:
     void readBody(std::uint32_t length);
     void handleMessage(const SyncMessage& msg);
     void doSend(const SyncMessage& msg);
+    void writeNext();
+    void handleConnectionFailure();
 
     alarm::AlarmManager& manager_;
     std::string host_;
@@ -141,6 +151,8 @@ private:
     std::atomic<bool> connected_{false};
     std::array<char, 4> header_buf_{};
     std::vector<char> body_buf_;
+    std::deque<std::shared_ptr<std::vector<char>>> write_queue_;
+    bool write_in_progress_{false};
 };
 
 } // namespace opendial::sync

@@ -1,9 +1,11 @@
 #include <sync.h>
 
-#include <cstdlib>
+#include <charconv>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace opendial::sync {
 
@@ -11,6 +13,31 @@ namespace opendial::sync {
 
 static constexpr char kRecordSep = '\x1E';
 static constexpr char kFieldSep  = '\x1F';
+static constexpr std::uint32_t kMaxFrameLength = 16 * 1024 * 1024;
+
+static bool isKnownMessageType(std::uint8_t value) {
+    return value >= static_cast<std::uint8_t>(MessageType::FullSyncRequest) &&
+           value <= static_cast<std::uint8_t>(MessageType::Ack);
+}
+
+static bool parseUint64(std::string_view value, std::uint64_t& result) {
+    if (value.empty()) return false;
+    const auto* first = value.data();
+    const auto* last = first + value.size();
+    const auto [end, error] = std::from_chars(first, last, result);
+    return error == std::errc{} && end == last;
+}
+
+static bool parseDeletePayload(std::string_view payload, std::string& uuid,
+                               std::uint64_t& version) {
+    const auto separator = payload.find(kFieldSep);
+    if (separator == std::string_view::npos || separator == 0 ||
+        payload.find(kFieldSep, separator + 1) != std::string_view::npos) {
+        return false;
+    }
+    uuid.assign(payload.substr(0, separator));
+    return parseUint64(payload.substr(separator + 1), version) && version != 0;
+}
 
 static void writeUint32BE(char* buf, std::uint32_t val) {
     buf[0] = static_cast<char>((val >> 24) & 0xFF);
@@ -28,6 +55,17 @@ static std::uint32_t readUint32BE(const char* buf) {
 
 std::vector<char> SyncMessage::encode() const {
     // Frame: [4-byte length] [1-byte type] [payload...]
+    const auto type_value = static_cast<std::uint8_t>(type);
+    if (!isKnownMessageType(type_value)) {
+        throw std::invalid_argument("unknown sync message type");
+    }
+    if ((type == MessageType::FullSyncRequest || type == MessageType::Ack) &&
+        !payload.empty()) {
+        throw std::invalid_argument("message type does not accept a payload");
+    }
+    if (payload.size() > kMaxFrameLength - 1) {
+        throw std::length_error("sync message exceeds protocol limits");
+    }
     std::uint32_t payload_len =
         static_cast<std::uint32_t>(1 + payload.size());
     std::vector<char> buf(4 + payload_len);
@@ -39,9 +77,16 @@ std::vector<char> SyncMessage::encode() const {
 
 std::optional<SyncMessage> SyncMessage::decode(const char* data,
                                                 std::size_t len) {
-    if (len < 1) return std::nullopt;
+    if (data == nullptr || len < 1 || len > kMaxFrameLength ||
+        !isKnownMessageType(static_cast<std::uint8_t>(data[0]))) {
+        return std::nullopt;
+    }
     SyncMessage msg;
     msg.type = static_cast<MessageType>(static_cast<unsigned char>(data[0]));
+    if ((msg.type == MessageType::FullSyncRequest || msg.type == MessageType::Ack) &&
+        len != 1) {
+        return std::nullopt;
+    }
     if (len > 1) msg.payload.assign(data + 1, len - 1);
     return msg;
 }
@@ -58,13 +103,48 @@ SyncSession::SyncSession(asio::ip::tcp::socket socket,
 void SyncSession::start() { readHeader(); }
 
 void SyncSession::send(const SyncMessage& msg) {
-    auto buf = std::make_shared<std::vector<char>>(msg.encode());
+    std::shared_ptr<std::vector<char>> buffer;
+    try {
+        buffer = std::make_shared<std::vector<char>>(msg.encode());
+    } catch (const std::exception&) {
+        auto self = shared_from_this();
+        asio::post(socket_.get_executor(), [self] { self->disconnect(); });
+        return;
+    }
+    auto self = shared_from_this();
+    asio::post(socket_.get_executor(),
+               [self, buffer] { self->enqueueWrite(buffer); });
+}
+
+void SyncSession::enqueueWrite(std::shared_ptr<std::vector<char>> buffer) {
+    if (disconnected_) return;
+    write_queue_.push_back(std::move(buffer));
+    writeNext();
+}
+
+void SyncSession::writeNext() {
+    if (disconnected_ || write_in_progress_ || write_queue_.empty()) return;
+    write_in_progress_ = true;
     auto self = shared_from_this();
     asio::async_write(
-        socket_, asio::buffer(*buf),
-        [self, buf](std::error_code /*ec*/, std::size_t /*n*/) {
-            // fire-and-forget; disconnect handled in read path
+        socket_, asio::buffer(*write_queue_.front()),
+        [this, self](std::error_code ec, std::size_t /*n*/) {
+            if (ec) {
+                disconnect();
+                return;
+            }
+            write_queue_.pop_front();
+            write_in_progress_ = false;
+            writeNext();
         });
+}
+
+void SyncSession::disconnect() {
+    if (disconnected_) return;
+    disconnected_ = true;
+    std::error_code ec;
+    socket_.close(ec);
+    on_disconnect_(shared_from_this());
 }
 
 void SyncSession::readHeader() {
@@ -73,12 +153,12 @@ void SyncSession::readHeader() {
         socket_, asio::buffer(header_buf_),
         [this, self](std::error_code ec, std::size_t /*n*/) {
             if (ec) {
-                on_disconnect_(self);
+                disconnect();
                 return;
             }
             std::uint32_t body_len = readUint32BE(header_buf_.data());
-            if (body_len == 0 || body_len > 16 * 1024 * 1024) {
-                on_disconnect_(self);
+            if (body_len == 0 || body_len > kMaxFrameLength) {
+                disconnect();
                 return;
             }
             readBody(body_len);
@@ -92,12 +172,12 @@ void SyncSession::readBody(std::uint32_t length) {
         socket_, asio::buffer(body_buf_),
         [this, self, length](std::error_code ec, std::size_t /*n*/) {
             if (ec) {
-                on_disconnect_(self);
+                disconnect();
                 return;
             }
             auto msg = SyncMessage::decode(body_buf_.data(), length);
             if (msg) on_message_(self, *msg);
-            readHeader(); // continue reading
+            if (!disconnected_) readHeader(); // continue reading
         });
 }
 
@@ -111,21 +191,34 @@ SyncServer::~SyncServer() { stop(); }
 void SyncServer::start() {
     if (running_.exchange(true)) return; // already running
 
-    acceptor_.emplace(io_context_,
-                      asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port_));
-    accept();
-
-    io_thread_ = std::thread([this] {
-        io_context_.run();
-    });
+    try {
+        io_context_.restart();
+        acceptor_.emplace(io_context_,
+                          asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port_));
+        port_ = acceptor_->local_endpoint().port();
+        accept();
+        io_thread_ = std::thread([this] { io_context_.run(); });
+    } catch (...) {
+        running_ = false;
+        acceptor_.reset();
+        throw;
+    }
 }
 
 void SyncServer::stop() {
     if (!running_.exchange(false)) return;
+    if (acceptor_) {
+        std::error_code ec;
+        acceptor_->close(ec);
+    }
     io_context_.stop();
     if (io_thread_.joinable()) io_thread_.join();
-    std::lock_guard lock(sessions_mutex_);
-    sessions_.clear();
+    {
+        std::lock_guard lock(sessions_mutex_);
+        sessions_.clear();
+    }
+    acceptor_.reset();
+    io_context_.restart();
 }
 
 void SyncServer::accept() {
@@ -163,8 +256,7 @@ void SyncServer::handleMessage(std::shared_ptr<SyncSession> session,
     }
     case MessageType::AlarmUpdate: {
         auto alarm = alarm::Alarm::deserialize(msg.payload);
-        if (alarm) {
-            manager_.mergeAlarm(*alarm);
+        if (alarm && manager_.mergeAlarm(*alarm)) {
             // Relay to other sessions.
             broadcast(msg, session);
         }
@@ -172,16 +264,10 @@ void SyncServer::handleMessage(std::shared_ptr<SyncSession> session,
     }
     case MessageType::AlarmDelete: {
         // payload = "uuid\x1Fversion"
-        auto sep = msg.payload.find(kFieldSep);
-        if (sep != std::string::npos) {
-            try {
-                std::string uuid = msg.payload.substr(0, sep);
-                std::uint64_t ver = std::stoull(msg.payload.substr(sep + 1));
-                manager_.mergeDelete(uuid, ver);
-                broadcast(msg, session);
-            } catch (const std::exception&) {
-                // Ignore malformed delete payloads from the wire.
-            }
+        std::string uuid;
+        std::uint64_t ver = 0;
+        if (parseDeletePayload(msg.payload, uuid, ver)) {
+            if (manager_.mergeDelete(uuid, ver)) broadcast(msg, session);
         }
         break;
     }
@@ -229,12 +315,20 @@ SyncClient::~SyncClient() { disconnect(); }
 void SyncClient::connect() {
     if (connected_) return;
 
+    if (io_thread_.joinable()) disconnect();
+    io_context_.restart();
+    socket_.reset();
     asio::ip::tcp::resolver resolver(io_context_);
-    auto endpoints = resolver.resolve(host_, std::to_string(port_));
-
-    socket_.emplace(io_context_);
-    asio::connect(*socket_, endpoints);
-    connected_ = true;
+    try {
+        auto endpoints = resolver.resolve(host_, std::to_string(port_));
+        socket_.emplace(io_context_);
+        asio::connect(*socket_, endpoints);
+        connected_ = true;
+    } catch (...) {
+        socket_.reset();
+        io_context_.restart();
+        throw;
+    }
 
     readHeader();
 
@@ -244,13 +338,17 @@ void SyncClient::connect() {
 }
 
 void SyncClient::disconnect() {
-    if (!connected_.exchange(false)) return;
+    connected_ = false;
     io_context_.stop();
     if (io_thread_.joinable()) io_thread_.join();
     if (socket_ && socket_->is_open()) {
         std::error_code ec;
         socket_->close(ec);
     }
+    socket_.reset();
+    write_queue_.clear();
+    write_in_progress_ = false;
+    io_context_.restart();
 }
 
 bool SyncClient::isConnected() const { return connected_; }
@@ -272,10 +370,45 @@ void SyncClient::requestFullSync() {
 
 void SyncClient::doSend(const SyncMessage& msg) {
     if (!connected_ || !socket_) return;
-    auto buf = std::make_shared<std::vector<char>>(msg.encode());
+    std::shared_ptr<std::vector<char>> buffer;
+    try {
+        buffer = std::make_shared<std::vector<char>>(msg.encode());
+    } catch (const std::exception&) {
+        return;
+    }
+    asio::post(io_context_, [this, buffer] {
+        if (!connected_ || !socket_ || !socket_->is_open()) return;
+        write_queue_.push_back(buffer);
+        writeNext();
+    });
+}
+
+void SyncClient::writeNext() {
+    if (!connected_ || !socket_ || write_in_progress_ || write_queue_.empty()) {
+        return;
+    }
+    write_in_progress_ = true;
     asio::async_write(
-        *socket_, asio::buffer(*buf),
-        [buf](std::error_code /*ec*/, std::size_t /*n*/) {});
+        *socket_, asio::buffer(*write_queue_.front()),
+        [this](std::error_code ec, std::size_t /*n*/) {
+            if (ec) {
+                handleConnectionFailure();
+                return;
+            }
+            write_queue_.pop_front();
+            write_in_progress_ = false;
+            writeNext();
+        });
+}
+
+void SyncClient::handleConnectionFailure() {
+    connected_ = false;
+    write_queue_.clear();
+    write_in_progress_ = false;
+    if (socket_) {
+        std::error_code ec;
+        socket_->close(ec);
+    }
 }
 
 void SyncClient::readHeader() {
@@ -285,12 +418,12 @@ void SyncClient::readHeader() {
         *socket_, asio::buffer(header_buf_),
         [self](std::error_code ec, std::size_t /*n*/) {
             if (ec) {
-                self->connected_ = false;
+                self->handleConnectionFailure();
                 return;
             }
             std::uint32_t body_len = readUint32BE(self->header_buf_.data());
-            if (body_len == 0 || body_len > 16 * 1024 * 1024) {
-                self->connected_ = false;
+            if (body_len == 0 || body_len > kMaxFrameLength) {
+                self->handleConnectionFailure();
                 return;
             }
             self->readBody(body_len);
@@ -304,12 +437,12 @@ void SyncClient::readBody(std::uint32_t length) {
         *socket_, asio::buffer(body_buf_),
         [self, length](std::error_code ec, std::size_t /*n*/) {
             if (ec) {
-                self->connected_ = false;
+                self->handleConnectionFailure();
                 return;
             }
             auto msg = SyncMessage::decode(self->body_buf_.data(), length);
             if (msg) self->handleMessage(*msg);
-            self->readHeader();
+            if (self->connected_) self->readHeader();
         });
 }
 
@@ -337,15 +470,10 @@ void SyncClient::handleMessage(const SyncMessage& msg) {
         break;
     }
     case MessageType::AlarmDelete: {
-        auto sep = msg.payload.find(kFieldSep);
-        if (sep != std::string::npos) {
-            try {
-                std::string uuid = msg.payload.substr(0, sep);
-                std::uint64_t ver = std::stoull(msg.payload.substr(sep + 1));
+        std::string uuid;
+        std::uint64_t ver = 0;
+        if (parseDeletePayload(msg.payload, uuid, ver)) {
                 manager_.mergeDelete(uuid, ver);
-            } catch (const std::exception&) {
-                // Ignore malformed delete payloads from the wire.
-            }
         }
         break;
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -91,7 +92,7 @@ private:
 
     std::string device_id_;
     mutable std::mutex mutex_;
-    std::unordered_map<std::string, Alarm> alarms_;
+    std::unordered_map<std::string, std::shared_ptr<const Alarm>> alarms_;
     // Track deleted UUIDs with their version to avoid resurrection via sync
     std::unordered_map<std::string, std::uint64_t> tombstones_;
     std::vector<std::shared_ptr<AlarmObserver>> observers_;
